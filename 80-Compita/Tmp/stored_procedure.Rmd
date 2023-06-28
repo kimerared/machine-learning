@@ -1,0 +1,153 @@
+```{r}
+#rxOptions(numCoresToUse = -1)
+rxOptions(numCoresToUse = 7)
+
+slqConnString<- "SERVER=FIN_CEN_029\\SQLEXPRESSPETERG;DATABASE=ITXdScience;Trusted_Connection=Yes;Driver=SQL Server Native Client 11.0;"
+sqlRowsPerRead = 10000 
+sqlNewInputView <- "PreCalcModel"
+sqlNewInputDS <- RxSqlServerData(connectionString = slqConnString, table = sqlNewInputView, rowsPerRead = sqlRowsPerRead) 
+XVar <- rxImport(inData = sqlNewInputDS, outFile = NULL, overwrite = TRUE)
+sqlScoreTable <- "store_models_all"
+sqlScoreDS <- RxSqlServerData(connectionString = slqConnString, table = sqlScoreTable, rowsPerRead = sqlRowsPerRead)
+
+
+#Build Formula
+train_vars <- rxGetVarNames(XVar)
+train_vars <- train_vars[!train_vars %in% 
+                           c("Minut"
+                             , "MESSAGE_DATE_D"
+                             , "BilledFrom"
+                             , "BILLING_OPERATOR"
+                             , "RATING_SCENARIO_N_D"
+                             , "Escenario"
+							 , "minut_MA_07"
+ 							 , "id01"
+							 , "id02"
+							 , "id03"
+							)
+						   ]
+temp<-paste(c("Minut",paste(train_vars, collapse="+") ),collapse="~")
+
+fx <- as.formula(temp)
+
+#End build Formula
+
+
+T_PredictFull <- function(keys, data, fx) {
+  
+  slqConnString<- "SERVER=FIN_CEN_029\\SQLEXPRESSPETERG;DATABASE=ITXdScience;Trusted_Connection=Yes;Driver=SQL Server Native Client 11.0;"
+  sqlRowsPerRead = 50000 
+  sqlScoreTable <- "minutes_score_test_All"
+  sqlScoreDS <- RxSqlServerData(connectionString = slqConnString, table = sqlScoreTable, rowsPerRead = sqlRowsPerRead)
+  
+  MO_FT_func <- rxFastTrees(
+                            formula = fx, 
+                            data = data,
+                            minSplit = NULL, numTrees = NULL,
+                            numLeaves = NULL,
+                            learningRate = 0.1,
+                            type = "regression"
+                          )
+  
+  r_pred2 <- rxPredict(modelObject = MO_FT_func,
+                       data = rxImport(inData = data, outFile = NULL, overwrite = TRUE),
+                       outData = NULL,
+                       #predVarNames = "pronostico_minutos",
+                       writeModelVars = FALSE,
+                       extraVarsToWrite = c("Minut"
+										#, "START_CALL_COUNT_D"
+										,"MESSAGE_DATE_D"
+										, "Escenario"
+										#, "DayWeek"
+										),
+                       overwrite = TRUE)
+  
+  r_pred2$DayWeek <- as.integer(as.POSIXlt(r_pred2$MESSAGE_DATE_D)$wday + 1)
+
+  StoreModel_DS <- RxSqlServerData(connectionString = slqConnString
+                                   , table = "store_models_all"
+                                   , rowsPerRead = sqlRowsPerRead)  
+  
+  rxWriteObject(StoreModel_DS, keys, MO_FT_func)
+  
+  rxDataStep(inData = r_pred2, sqlScoreDS, append = "rows")
+}
+
+
+## Inicio Ejecución
+
+ StoreModel_DS <- RxSqlServerData(connectionString = slqConnString
+                                   , table = "store_models_all"
+                                   , rowsPerRead = sqlRowsPerRead)  
+
+# Regenerar Tabla de modelos
+ddl <- paste(" create table [", StoreModel_DS@table, "] (",
+             "     [id] varchar(200) null, ",
+             "     [value] varbinary(max) ",
+             #"     constraint unique_id unique (id),
+             ")",
+             sep = "")
+
+slqConnString<- "SERVER=FIN_CEN_029\\SQLEXPRESSPETERG;DATABASE=ITXdScience;Trusted_Connection=Yes;Driver=SQL Server Native Client 11.0;"
+StoreModel_DS <- RxSqlServerData(connectionString = slqConnString
+                                 , table = "store_models_all")  
+
+rxOpen(StoreModel_DS)  #Check Out
+
+if(rxSqlServerTableExists(StoreModel_DS@table, StoreModel_DS@connectionString)) {
+  rxSqlServerDropTable(StoreModel_DS@table, StoreModel_DS@connectionString)
+}
+
+rxExecuteSQLDDL(StoreModel_DS, sSQLString = ddl)
+#rxExecuteSQLDDL(StoreModel_DS, sSQLString = "GRANT CONTROL ON store_models_all TO xxx")
+#rxExecuteSQLDDL(StoreModel_DS, sSQLString = "GRANT INSERT ON store_models_all TO xxx")
+
+# FIN  Regenerar Tabla de modelos
+
+
+# Regenerar Tabla Score
+slqConnString<- "SERVER=FIN_CEN_029\\SQLEXPRESSPETERG;DATABASE=ITXdScience;Trusted_Connection=Yes;Driver=SQL Server Native Client 11.0;"
+Score_DS <- RxSqlServerData(connectionString = slqConnString
+                                 , table = "minutes_score_test_All")  
+
+rxOpen(Score_DS)
+if(rxSqlServerTableExists(Score_DS@table
+                          , Score_DS@connectionString)) {
+  rxSqlServerDropTable(Score_DS@table, Score_DS@connectionString)
+}
+
+dd_TS <- paste(" create table [", Score_DS@table, "] (",
+             "     [Score] [float] NULL, ",
+             "     [Minut] [float] NULL, ",
+             "     [MESSAGE_DATE_D] [date] NOT NULL,",
+             "     [Escenario] [varchar](50) COLLATE Modern_Spanish_CI_AS NOT NULL,",
+             "     [DayWeek] [int] NOT NULL,",
+             "     CONSTRAINT [Clave_Prim_2]  PRIMARY KEY NONCLUSTERED ",
+             "     (",
+             "     ESCENARIO, [MESSAGE_DATE_D] DESC",
+             "     )",
+		   #"     ),",
+             #"     INDEX [minutes_score_test_bd_índice] NONCLUSTERED",
+             #"     (",
+             #"     ESCENARIO, DayWeek, [MESSAGE_DATE_D] DESC",
+             #"     )",
+             "     )WITH ( MEMORY_OPTIMIZED = ON , DURABILITY = SCHEMA_AND_DATA)",
+             sep = "")
+
+
+rxExecuteSQLDDL(Score_DS, sSQLString = dd_TS)
+#rxExecuteSQLDDL(Score_DS, sSQLString = "GRANT SELECT ON minutes_score_test_All TO B_OperUpd")
+#rxExecuteSQLDDL(StoreModel_DS, sSQLString = "GRANT INSERT ON minutes_score_test_All TO xxx")
+
+# FIN  Regenerar Tabla Score
+
+ODS_pred <- rxExecBy(
+                     inData = XVar, 
+                     keys = c("Escenario"), 
+                     func = T_PredictFull,
+					 filterFunc = function(x) x,
+                     fx
+                    )
+
+ 
+```
